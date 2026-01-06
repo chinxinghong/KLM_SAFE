@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8" />
+  <title>出警系统</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+  <!-- PWA -->
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#d32f2f">
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+  <style>
+    body { font-family: Arial; margin: 0; padding: 10px; }
+    h2 { margin-top: 0; }
+    input, select, textarea, button {
+      width: 100%; padding: 10px; margin: 6px 0;
+    }
+    #map { height: 300px; margin-top: 10px; }
+    .card { border: 1px solid #ccc; padding: 10px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+
+<h2>🚨 出警系统</h2>
+
+<div class="card">
+  <select id="type">
+    <option value="MVA">交通事故 MVA</option>
+    <option value="火灾">火灾</option>
+    <option value="捉蛇">捉蛇</option>
+    <option value="其他">其他</option>
+  </select>
+
+  <input id="vehicle" placeholder="🚒 车辆编号 / 车牌">
+  <input id="leader" placeholder="👨‍🚒 车长姓名">
+  <textarea id="members" placeholder="👥 队员（逗号分隔）"></textarea>
+  <textarea id="note" placeholder="📝 现场情况备注"></textarea>
+
+  <button id="btnLocate">📍 获取当前位置</button>
+  <button id="btnMission">🚨 新出警</button>
+</div>
+
+<div id="map"></div>
+<div id="list"></div>
+
+<!-- Libraries -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/8.10.0/firebase-database.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
+<script>
+/********************
+ * Firebase 配置
+ ********************/
+const firebaseConfig = {
+  apiKey: "AIzaSyALQICqeblHAcxsrZDWskl3qXqjeLon-gQ",
+  authDomain: "klm-01-31490.firebaseapp.com",
+  databaseURL: "https://klm-01-31490-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "klm-01-31490",
+  storageBucket: "klm-01-31490.appspot.com",
+  messagingSenderId: "xxxx",
+  appId: "xxxx"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+/********************
+ * 地图初始化
+ ********************/
+let map = L.map('map').setView([5.364, 100.561], 13);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 19
+}).addTo(map);
+
+let userMarker = null;
+let currentPos = null;
+let markers = {};
+
+/********************
+ * 定位（用户点击）
+ ********************/
+function requestLocation() {
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      currentPos = pos.coords;
+      const latlng = [pos.coords.latitude, pos.coords.longitude];
+      map.setView(latlng, 16);
+
+      if (userMarker) userMarker.setLatLng(latlng);
+      else userMarker = L.marker(latlng).addTo(map).bindPopup("你的位置").openPopup();
+    },
+    err => alert("定位失败，请开启 GPS 并允许权限"),
+    { enableHighAccuracy: true, timeout: 15000 }
+  );
+}
+
+/********************
+ * 新出警
+ ********************/
+function createMission() {
+  if (!currentPos) return alert("请先获取当前位置");
+
+  const now = Date.now();
+
+  const data = {
+    type: type.value,
+    vehicle: vehicle.value,
+    leader: leader.value,
+    members: members.value,
+    note: note.value,
+    lat: currentPos.latitude,
+    lng: currentPos.longitude,
+    time: new Date().toLocaleString(),
+    startTime: now,
+    endTime: null,
+    status: "出警中"
+  };
+
+  db.ref("missions").push(data);
+}
+
+/********************
+ * 完成出警
+ ********************/
+function finishMission(id) {
+  db.ref("missions/" + id).update({
+    status: "已完成",
+    endTime: Date.now()
+  });
+}
+
+/********************
+ * 时间计算
+ ********************/
+function calcDuration(start, end) {
+  const s = Math.floor((end - start) / 1000);
+  return `${Math.floor(s / 60)}分${s % 60}秒`;
+}
+
+/********************
+ * 报告生成（文字 + PDF）
+ ********************/
+function generatePDF(id) {
+  db.ref("missions/" + id).once("value").then(snap => {
+    const m = snap.val();
+    if (!m) return;
+
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+
+    let y = 15;
+    const line = t => { doc.text(t, 10, y); y += 8; };
+
+    line("出警报告");
+    line("-------------------");
+    line(`类型：${m.type}`);
+    line(`时间：${m.time}`);
+    line(`地点：${m.lat}, ${m.lng}`);
+    line("");
+    line(`车辆：${m.vehicle}`);
+    line(`车长：${m.leader}`);
+    line(`队员：${m.members}`);
+    line(`状态：${m.status}`);
+    line(`时长：${calcDuration(m.startTime, m.endTime)}`);
+    line("");
+    line("现场情况：");
+    doc.text(m.note || "-", 10, y, { maxWidth: 180 });
+
+    doc.save("出警报告.pdf");
+  });
+}
+
+/********************
+ * 监听任务
+ ********************/
+db.ref("missions").on("value", snap => {
+  list.innerHTML = "";
+  const data = snap.val() || {};
+
+  Object.entries(data).forEach(([id, m]) => {
+    const icon = L.icon({
+      iconUrl: m.status === "出警中"
+        ? "https://maps.gstatic.com/mapfiles/ms2/micons/red-dot.png"
+        : "https://maps.gstatic.com/mapfiles/ms2/micons/green-dot.png",
+      iconSize: [32, 32], iconAnchor: [16, 32]
+    });
+
+    if (!markers[id]) {
+      markers[id] = L.marker([m.lat, m.lng], { icon }).addTo(map)
+        .bindPopup(`${m.type}<br>${m.status}`);
+    }
+
+    list.innerHTML += `
+      <div class="card">
+        <b>${m.type}</b><br>
+        车辆：${m.vehicle}<br>
+        车长：${m.leader}<br>
+        状态：${m.status}<br>
+        ${m.status === "出警中"
+          ? `<button onclick="finishMission('${id}')">完成</button>`
+          : `<button onclick="generatePDF('${id}')">PDF</button>`}
+      </div>`;
+  });
+});
+
+btnLocate.onclick = requestLocation;
+btnMission.onclick = createMission;
+
+// PWA
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js');
+</script>
+
+</body>
+</html>
